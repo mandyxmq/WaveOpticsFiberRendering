@@ -71,6 +71,9 @@ Spectrum DirectLightingIntegrator::Li(const RayDifferential &ray,
         return L;
     }
 
+    // (Mandy Xia) Set wavelength index.
+    isect.wavelengthindex = ray.wavelengthindex;
+
     // Compute scattering functions for surface interaction
     isect.ComputeScatteringFunctions(ray, arena);
     if (!isect.bsdf)

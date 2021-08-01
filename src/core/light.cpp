@@ -56,8 +56,10 @@ Light::Light(int flags, const Transform &LightToWorld,
 
 Light::~Light() {}
 
-bool VisibilityTester::Unoccluded(const Scene &scene) const {
-    return !scene.IntersectP(p0.SpawnRayTo(p1));
+  bool VisibilityTester::Unoccluded(const Scene &scene, int wavelengthindex) const {
+  Ray r = p0.SpawnRayTo(p1);
+  r.wavelengthindex = wavelengthindex;
+    return !scene.IntersectP(r);
 }
 
 Spectrum VisibilityTester::Tr(const Scene &scene, Sampler &sampler) const {

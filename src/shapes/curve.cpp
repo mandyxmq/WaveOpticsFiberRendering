@@ -35,6 +35,10 @@
 #include "shapes/curve.h"
 #include "paramset.h"
 #include "stats.h"
+#include <assert.h>
+
+extern float *RATIO;
+extern int fibertype;
 
 namespace pbrt {
 
@@ -103,7 +107,7 @@ CurveCommon::CurveCommon(const Point3f c[4], Float width0, Float width1,
 std::vector<std::shared_ptr<Shape>> CreateCurve(
     const Transform *o2w, const Transform *w2o, bool reverseOrientation,
     const Point3f *c, Float w0, Float w1, CurveType type,
-    const Normal3f *norm, int splitDepth) {
+    const Normal3f *norm, int splitDepth, Float ori) {
     std::vector<std::shared_ptr<Shape>> segments;
     std::shared_ptr<CurveCommon> common =
         std::make_shared<CurveCommon>(c, w0, w1, type, norm);
@@ -113,7 +117,7 @@ std::vector<std::shared_ptr<Shape>> CreateCurve(
         Float uMin = i / (Float)nSegments;
         Float uMax = (i + 1) / (Float)nSegments;
         segments.push_back(std::make_shared<Curve>(o2w, w2o, reverseOrientation,
-                                                   common, uMin, uMax));
+                                                   common, uMin, uMax, ori));
         ++nSplitCurves;
     }
     curveBytes += sizeof(CurveCommon) + nSegments * sizeof(Curve);
@@ -141,6 +145,7 @@ bool Curve::Intersect(const Ray &r, Float *tHit, SurfaceInteraction *isect,
     // Transform _Ray_ to object space
     Vector3f oErr, dErr;
     Ray ray = (*WorldToObject)(r, &oErr, &dErr);
+    ray.wavelengthindex = r.wavelengthindex;
 
     // Compute object-space control points for curve segment, _cpObj_
     Point3f cpObj[4];
@@ -229,10 +234,16 @@ bool Curve::Intersect(const Ray &r, Float *tHit, SurfaceInteraction *isect,
                               uMax, maxDepth);
 }
 
+  // (Mandy Xia) Wavelength dependent intersection test
+  // Use cylinder primitive but 
 bool Curve::recursiveIntersect(const Ray &ray, Float *tHit,
                                SurfaceInteraction *isect, const Point3f cp[4],
                                const Transform &rayToObject, Float u0, Float u1,
                                int depth) const {
+
+  // if (ray.wavelengthindex>49)
+  //   std::cout<<"ray.wavelengthindex "<<ray.wavelengthindex<<std::endl;
+
     Float rayLength = ray.d.Length();
 
     if (depth > 0) {
@@ -320,6 +331,10 @@ bool Curve::recursiveIntersect(const Ray &ray, Float *tHit,
             hitWidth *= AbsDot(nHit, ray.d) / rayLength;
         }
 
+        if (common->type == CurveType::Ribbon_new){
+          nHit = Normal3f(0,0,1);
+        }
+
         // Test intersection point against curve width
         Vector3f dpcdw;
         Point3f pc = EvalBezier(cp, Clamp(w, 0, 1), &dpcdw);
@@ -334,9 +349,10 @@ bool Curve::recursiveIntersect(const Ray &ray, Float *tHit,
         Float v = (edgeFunc > 0) ? 0.5f + ptCurveDist / hitWidth
                                  : 0.5f - ptCurveDist / hitWidth;
 
-        // Compute hit _t_ and partial derivatives for curve intersection
-        if (tHit != nullptr) {
-            // FIXME: this tHit isn't quite right for ribbons...
+        if (common->type!=CurveType::Ribbon_new){
+          // Original intersection code
+          *tHit = pc.z / rayLength;
+          if (tHit != nullptr) {
             *tHit = pc.z / rayLength;
             // Compute error bounds for curve intersection
             Vector3f pError(2 * hitWidth, 2 * hitWidth, 2 * hitWidth);
@@ -345,31 +361,115 @@ bool Curve::recursiveIntersect(const Ray &ray, Float *tHit,
             Vector3f dpdu, dpdv;
             EvalBezier(common->cpObj, u, &dpdu);
             CHECK_NE(Vector3f(0, 0, 0), dpdu) << "u = " << u << ", cp = " <<
-                common->cpObj[0] << ", " << common->cpObj[1] << ", " <<
-                common->cpObj[2] << ", " << common->cpObj[3];
+              common->cpObj[0] << ", " << common->cpObj[1] << ", " <<
+              common->cpObj[2] << ", " << common->cpObj[3];
 
             if (common->type == CurveType::Ribbon)
-                dpdv = Normalize(Cross(nHit, dpdu)) * hitWidth;
+              dpdv = Normalize(Cross(nHit, dpdu)) * hitWidth;
             else {
-                // Compute curve $\dpdv$ for flat and cylinder curves
-                Vector3f dpduPlane = (Inverse(rayToObject))(dpdu);
-                Vector3f dpdvPlane =
-                    Normalize(Vector3f(-dpduPlane.y, dpduPlane.x, 0)) *
-                    hitWidth;
-                if (common->type == CurveType::Cylinder) {
-                    // Rotate _dpdvPlane_ to give cylindrical appearance
-                    Float theta = Lerp(v, -90., 90.);
-                    Transform rot = Rotate(-theta, dpduPlane);
-                    dpdvPlane = rot(dpdvPlane);
-                }
-                dpdv = rayToObject(dpdvPlane);
+              // Compute curve $\dpdv$ for flat and cylinder curves
+              Vector3f dpduPlane = (Inverse(rayToObject))(dpdu);
+              Vector3f dpdvPlane =
+                Normalize(Vector3f(-dpduPlane.y, dpduPlane.x, 0)) *
+                hitWidth;
+              if (common->type == CurveType::Cylinder) {
+                // Rotate _dpdvPlane_ to give cylindrical appearance
+                Float theta = Lerp(v, -90., 90.);
+                Transform rot = Rotate(-theta, dpduPlane);
+                dpdvPlane = rot(dpdvPlane);
+              }
+              dpdv = rayToObject(dpdvPlane);
             }
             *isect = (*ObjectToWorld)(SurfaceInteraction(
-                ray(*tHit), pError, Point2f(u, v), -ray.d, dpdu, dpdv,
-                Normal3f(0, 0, 0), Normal3f(0, 0, 0), ray.time, this));
+                                                         ray(*tHit), pError, Point2f(u, v), -ray.d, dpdu, dpdv,
+                                                         Normal3f(0, 0, 0), Normal3f(0, 0, 0), ray.time, this));
+          }
+          ++nHits;
+          return true;
+
+        }else{
+          // New intersection code
+          // Compute error bounds for curve intersection
+          Vector3f pError(2 * hitWidth, 2 * hitWidth, 2 * hitWidth);
+
+          // Compute $\dpdu$ and $\dpdv$ for curve intersection
+          Vector3f dpdu, dpdv;
+          EvalBezier(common->cpObj, u, &dpdu);
+          CHECK_NE(Vector3f(0, 0, 0), dpdu) << "u = " << u << ", cp = " <<
+            common->cpObj[0] << ", " << common->cpObj[1] << ", " <<
+            common->cpObj[2] << ", " << common->cpObj[3];
+
+          dpdv = Normalize(Cross(nHit, dpdu)) * hitWidth;
+          Vector3f wo = Normalize(-ray.d);
+          Vector3f ns = Normalize(Cross(dpdu, dpdv));
+          Vector3f ss = Normalize(dpdu);
+          Vector3f ts = Cross(ns, ss);
+          Vector3f wo_local = Vector3f(Dot(wo, ss), Dot(wo, ts), Dot(wo, ns));
+          int thetanum = 100;
+          Float sinThetaO = wo_local.x;
+          CHECK(sinThetaO>=-1.0001 && sinThetaO<= 1.0001);
+
+          Float asino = std::asin(std::abs(sinThetaO));
+          Float unit = Pi / 2.0 / (Float)thetanum;
+          int floortheta = std::floor(asino / unit);
+          Float phiO = std::atan2(wo_local.z, wo_local.y);
+          // according to ori, rotate counter clockwise
+          phiO += ori * M_PI/180.0;
+
+          int phionum, floorphio;
+          Float phiOnew = phiO;
+          while (phiOnew > 2*Pi) phiOnew -= 2 * Pi;
+          while (phiOnew < 0) phiOnew += 2 * Pi;
+          if (fibertype==0){
+            // circle
+            phionum = 1;
+            floorphio = 0;
+          }else if (fibertype==1){
+            // ellipse
+            phionum = 90;
+            if (phiOnew >= Pi/2 && phiOnew < Pi){
+              phiOnew = Pi - phiOnew;
+            } else if (phiOnew >= Pi && phiOnew < 3.0*Pi/2.0){
+              phiOnew -= Pi;
+            } else if (phiOnew >= 3.0*Pi/2.0){
+              phiOnew -= Pi;
+              phiOnew = Pi - phiOnew;
+            }
+            unit = Pi / 2 / (Float)phionum;
+            floorphio = Clamp(std::floor(phiOnew / unit), 0, phionum-1);
+          }else{
+            // non elliptical
+            phionum = 360;
+            unit = Pi * 2 / (Float)phionum;
+            floorphio = Clamp(std::floor(phiOnew / unit), 0, phionum-1);
+          }
+          int index = ray.wavelengthindex*thetanum*phionum+floortheta*phionum+floorphio;
+          Float curratio = 0;
+          if (!(std::isinf(index) || std::isnan(index))){
+            curratio = RATIO[index];
+          }
+          curratio = Clamp(curratio, 0, 1);
+
+          Float h = 2 * v - 1;
+
+          if (std::abs(h) > curratio){
+            return false; // should pass through fibers
+          }else{
+            // recompute v
+            Float hnew = h / curratio;
+            Float vnew = (hnew+1)/2.0;
+            Vector3f dpdvnew = dpdv;
+            Vector3f pErrornew = pError * curratio;
+            if  (tHit != nullptr) {
+              *tHit = pc.z / rayLength;
+              *isect = (*ObjectToWorld)(SurfaceInteraction(
+                                                           ray(*tHit), pErrornew, Point2f(u, vnew), -ray.d, dpdu, dpdvnew,
+                                                           Normal3f(0, 0, 0), Normal3f(0, 0, 0), ray.time, this));
+              }
+            ++nHits;
+            return true;
+          }
         }
-        ++nHits;
-        return true;
     }
 }
 
@@ -401,6 +501,8 @@ std::vector<std::shared_ptr<Shape>> CreateCurveShape(const Transform *o2w,
     Float width = params.FindOneFloat("width", 1.f);
     Float width0 = params.FindOneFloat("width0", width);
     Float width1 = params.FindOneFloat("width1", width);
+    // (Mandy Xia) Add orientation
+    Float ori = params.FindOneFloat("ori", 0.f);
 
     int degree = params.FindOneInt("degree", 3);
     if (degree != 2 && degree != 3) {
@@ -448,6 +550,8 @@ std::vector<std::shared_ptr<Shape>> CreateCurveShape(const Transform *o2w,
         type = CurveType::Ribbon;
     else if (curveType == "cylinder")
         type = CurveType::Cylinder;
+    else if (curveType == "ribbon_new")
+      type = CurveType::Ribbon_new;   // (Mandy Xia) new type that has a different intersection test.
     else {
         Error("Unknown curve type \"%s\".  Using \"cylinder\".", curveType.c_str());
         type = CurveType::Cylinder;
@@ -549,7 +653,7 @@ std::vector<std::shared_ptr<Shape>> CreateCurveShape(const Transform *o2w,
         auto c = CreateCurve(o2w, w2o, reverseOrientation, segCpBezier,
                              Lerp(Float(seg) / Float(nSegments), width0, width1),
                              Lerp(Float(seg + 1) / Float(nSegments), width0, width1),
-                             type, n ? &n[seg] : nullptr, sd);
+                             type, n ? &n[seg] : nullptr, sd, ori);
         curves.insert(curves.end(), c.begin(), c.end());
     }
     return curves;

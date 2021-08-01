@@ -45,10 +45,14 @@ STAT_COUNTER("Intersections/Shadow ray intersection tests", nShadowTests);
 bool Scene::Intersect(const Ray &ray, SurfaceInteraction *isect) const {
     ++nIntersectionTests;
     DCHECK_NE(ray.d, Vector3f(0,0,0));
+
     return aggregate->Intersect(ray, isect);
 }
 
 bool Scene::IntersectP(const Ray &ray) const {
+  // if (ray.wavelengthindex>49)
+  //   std::cout<<"scene intersectP ray.wavelengthindex "<<ray.wavelengthindex<<std::endl;
+
     ++nShadowTests;
     DCHECK_NE(ray.d, Vector3f(0,0,0));
     return aggregate->IntersectP(ray);

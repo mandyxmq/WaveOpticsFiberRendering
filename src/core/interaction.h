@@ -98,6 +98,8 @@ struct Interaction {
     Vector3f wo;
     Normal3f n;
     MediumInterface mediumInterface;
+    // (Mandy Xia) Add a field for wavelength index.
+    int wavelengthindex;
 };
 
 class MediumInteraction : public Interaction {

@@ -85,6 +85,7 @@ Spectrum UniformSampleAllLights(const Interaction &it, const Scene &scene,
 Spectrum UniformSampleOneLight(const Interaction &it, const Scene &scene,
                                MemoryArena &arena, Sampler &sampler,
                                bool handleMedia, const Distribution1D *lightDistrib) {
+  // std::cout<<"uniform sample one light"<<std::endl;
     ProfilePhase p(Prof::DirectLighting);
     // Randomly choose a single light to sample, _light_
     int nLights = int(scene.lights.size());
@@ -116,18 +117,24 @@ Spectrum EstimateDirect(const Interaction &it, const Point2f &uScattering,
     Vector3f wi;
     Float lightPdf = 0, scatteringPdf = 0;
     VisibilityTester visibility;
+
     Spectrum Li = light.Sample_Li(it, uLight, &wi, &lightPdf, &visibility);
+    for (int i = 0; i<nSpectralSamples; ++i)
+      Li[i] = Li[it.wavelengthindex];
+
     VLOG(2) << "EstimateDirect uLight:" << uLight << " -> Li: " << Li << ", wi: "
             << wi << ", pdf: " << lightPdf;
-    if (lightPdf > 0 && !Li.IsBlack()) {
+    if (lightPdf > 0 && Li[it.wavelengthindex]!=0) {
         // Compute BSDF or phase function's value for light sample
         Spectrum f;
         if (it.IsSurfaceInteraction()) {
             // Evaluate BSDF for light sampling strategy
             const SurfaceInteraction &isect = (const SurfaceInteraction &)it;
+
             f = isect.bsdf->f(isect.wo, wi, bsdfFlags) *
                 AbsDot(wi, isect.shading.n);
             scatteringPdf = isect.bsdf->Pdf(isect.wo, wi, bsdfFlags);
+
             VLOG(2) << "  surf f*dot :" << f << ", scatteringPdf: " << scatteringPdf;
         } else {
             // Evaluate phase function for light sampling strategy
@@ -143,7 +150,7 @@ Spectrum EstimateDirect(const Interaction &it, const Point2f &uScattering,
                 Li *= visibility.Tr(scene, sampler);
                 VLOG(2) << "  after Tr, Li: " << Li;
             } else {
-              if (!visibility.Unoccluded(scene)) {
+              if (!visibility.Unoccluded(scene, it.wavelengthindex)) {
                 VLOG(2) << "  shadow ray blocked";
                 Li = Spectrum(0.f);
               } else
@@ -157,6 +164,7 @@ Spectrum EstimateDirect(const Interaction &it, const Point2f &uScattering,
                 else {
                     Float weight =
                         PowerHeuristic(1, lightPdf, 1, scatteringPdf);
+
                     Ld += f * Li * weight / lightPdf;
                 }
             }
@@ -171,6 +179,7 @@ Spectrum EstimateDirect(const Interaction &it, const Point2f &uScattering,
             // Sample scattered direction for surface interactions
             BxDFType sampledType;
             const SurfaceInteraction &isect = (const SurfaceInteraction &)it;
+
             f = isect.bsdf->Sample_f(isect.wo, &wi, uScattering, &scatteringPdf,
                                      bsdfFlags, &sampledType);
             f *= AbsDot(wi, isect.shading.n);
@@ -184,7 +193,7 @@ Spectrum EstimateDirect(const Interaction &it, const Point2f &uScattering,
         }
         VLOG(2) << "  BSDF / phase sampling f: " << f << ", scatteringPdf: " <<
             scatteringPdf;
-        if (!f.IsBlack() && scatteringPdf > 0) {
+        if (f[it.wavelengthindex]!=0 && scatteringPdf > 0) {
             // Account for light contributions along sampled direction _wi_
             Float weight = 1;
             if (!sampledSpecular) {
@@ -196,6 +205,9 @@ Spectrum EstimateDirect(const Interaction &it, const Point2f &uScattering,
             // Find intersection and compute transmittance
             SurfaceInteraction lightIsect;
             Ray ray = it.SpawnRay(wi);
+
+            ray.wavelengthindex = it.wavelengthindex;
+
             Spectrum Tr(1.f);
             bool foundSurfaceInteraction =
                 handleMedia ? scene.IntersectTr(ray, sampler, &lightIsect, &Tr)
@@ -288,7 +300,14 @@ void SamplerIntegrator::Render(const Scene &scene) {
 
                     // Evaluate radiance along camera ray
                     Spectrum L(0.f);
-                    if (rayWeight > 0) L = Li(ray, scene, *tileSampler, arena);
+                    if (rayWeight > 0){
+                      //(Mandy Xia) Loop through wavelenghs;
+                      for (int index = 0; index < nSpectralSamples; ++index){
+                        ray.wavelengthindex = index;
+                        Spectrum Ltemp = Li(ray, scene, *tileSampler, arena);
+                        L[index] = Ltemp[index];
+                      }
+                    }
 
                     // Issue warning if unexpected radiance value returned
                     if (L.HasNaNs()) {
@@ -352,6 +371,7 @@ Spectrum SamplerIntegrator::SpecularReflect(
     if (pdf > 0.f && !f.IsBlack() && AbsDot(wi, ns) != 0.f) {
         // Compute ray differential _rd_ for specular reflection
         RayDifferential rd = isect.SpawnRay(wi);
+        rd.wavelengthindex = ray.wavelengthindex;
         if (ray.hasDifferentials) {
             rd.hasDifferentials = true;
             rd.rxOrigin = isect.p + isect.dpdx;
@@ -390,6 +410,7 @@ Spectrum SamplerIntegrator::SpecularTransmit(
     if (pdf > 0.f && !f.IsBlack() && AbsDot(wi, ns) != 0.f) {
         // Compute ray differential _rd_ for specular transmission
         RayDifferential rd = isect.SpawnRay(wi);
+        rd.wavelengthindex = ray.wavelengthindex;
         if (ray.hasDifferentials) {
             rd.hasDifferentials = true;
             rd.rxOrigin = p + isect.dpdx;

@@ -79,11 +79,13 @@ bool TransformedPrimitive::Intersect(const Ray &r,
     Transform InterpolatedPrimToWorld;
     PrimitiveToWorld.Interpolate(r.time, &InterpolatedPrimToWorld);
     Ray ray = Inverse(InterpolatedPrimToWorld)(r);
+    ray.wavelengthindex = r.wavelengthindex;
     if (!primitive->Intersect(ray, isect)) return false;
     r.tMax = ray.tMax;
     // Transform instance's intersection data to world space
     if (!InterpolatedPrimToWorld.IsIdentity())
         *isect = InterpolatedPrimToWorld(*isect);
+    isect->wavelengthindex=r.wavelengthindex;
     CHECK_GE(Dot(isect->n, isect->shading.n), 0);
     return true;
 }
@@ -110,6 +112,8 @@ GeometricPrimitive::GeometricPrimitive(const std::shared_ptr<Shape> &shape,
 Bounds3f GeometricPrimitive::WorldBound() const { return shape->WorldBound(); }
 
 bool GeometricPrimitive::IntersectP(const Ray &r) const {
+  // if (r.wavelengthindex>49)
+  //   std::cout<<"geometric intersectP r.wavelengthindex "<<r.wavelengthindex<<std::endl;
     return shape->IntersectP(r);
 }
 

@@ -887,6 +887,9 @@ class Ray {
     mutable Float tMax;
     Float time;
     const Medium *medium;
+
+  // (Mandy Xia) Add wavelength index
+  int wavelengthindex;
 };
 
 class RayDifferential : public Ray {

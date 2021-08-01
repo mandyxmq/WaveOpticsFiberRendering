@@ -47,7 +47,7 @@ namespace pbrt {
 // Spectrum Utility Declarations
 static const int sampledLambdaStart = 400;
 static const int sampledLambdaEnd = 700;
-static const int nSpectralSamples = 60;
+static const int nSpectralSamples = 50;
 extern bool SpectrumSamplesSorted(const Float *lambda, const Float *vals,
                                   int n);
 extern void SortSpectrumSamples(Float *lambda, Float *vals, int n);

@@ -66,7 +66,10 @@ Spectrum PathIntegrator::Li(const RayDifferential &r, const Scene &scene,
                             int depth) const {
     ProfilePhase p(Prof::SamplerIntegratorLi);
     Spectrum L(0.f), beta(1.f);
+
     RayDifferential ray(r);
+    ray.wavelengthindex = r.wavelengthindex;
+
     bool specularBounce = false;
     int bounces;
     // Added after book publication: etaScale tracks the accumulated effect
@@ -103,11 +106,15 @@ Spectrum PathIntegrator::Li(const RayDifferential &r, const Scene &scene,
         // Terminate path if ray escaped or _maxDepth_ was reached
         if (!foundIntersection || bounces >= maxDepth) break;
 
+        // (Mandy Xia) Set wavelength index.
+        isect.wavelengthindex = ray.wavelengthindex;
+
         // Compute scattering functions and skip over medium boundaries
         isect.ComputeScatteringFunctions(ray, arena, true);
         if (!isect.bsdf) {
             VLOG(2) << "Skipping intersection due to null bsdf";
             ray = isect.SpawnRay(ray.d);
+            ray.wavelengthindex = r.wavelengthindex;
             bounces--;
             continue;
         }
@@ -148,6 +155,7 @@ Spectrum PathIntegrator::Li(const RayDifferential &r, const Scene &scene,
             etaScale *= (Dot(wo, isect.n) > 0) ? (eta * eta) : 1 / (eta * eta);
         }
         ray = isect.SpawnRay(wi);
+        ray.wavelengthindex = r.wavelengthindex;
 
         // Account for subsurface scattering, if applicable
         if (isect.bssrdf && (flags & BSDF_TRANSMISSION)) {
@@ -171,6 +179,7 @@ Spectrum PathIntegrator::Li(const RayDifferential &r, const Scene &scene,
             DCHECK(!std::isinf(beta.y()));
             specularBounce = (flags & BSDF_SPECULAR) != 0;
             ray = pi.SpawnRay(wi);
+            ray.wavelengthindex = r.wavelengthindex;
         }
 
         // Possibly terminate the path with Russian roulette.

@@ -118,6 +118,17 @@
 #include <map>
 #include <stdio.h>
 
+#include <stdlib.h>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+
+float *BSDFTABLE = new float[972000000];
+float *PDFTABLE = new float[972000000];
+float *CDFTABLE = new float[972000000];
+float *RATIO = new float[1800000];
+int fibertype;
+
 namespace pbrt {
 
 // API Global Variables
@@ -1586,6 +1597,106 @@ void pbrtObjectInstance(const std::string &name) {
         std::make_shared<TransformedPrimitive>(in[0], animatedInstanceToWorld));
     renderOptions->primitives.push_back(prim);
 }
+
+  // (Mandy Xia) Helper function for reading in fiber azimuthal scattering functions
+  void readindata(std::string dir, std::string subfile, std::string prefix, unsigned long long num_samples, unsigned long long num_nor, int phionum, int method){
+    std::string filename;
+    for (int i = 0; i < nSpectralSamples; i++){
+      // read from binary
+      filename = dir+subfile+prefix+std::to_string(i)+".binary";
+      std::ifstream myfile1(filename, std::ios::in|std::ios::binary);
+      myfile1.read((char*)&BSDFTABLE[num_samples*i], num_samples*sizeof(float));
+
+      filename = dir+subfile+prefix+std::to_string(i)+"_nor.binary";
+      std::ifstream myfile2(filename, std::ios::in|std::ios::binary);
+      myfile2.read((char*)&PDFTABLE[num_samples*i], num_samples*sizeof(float));
+
+      filename = dir+subfile+prefix+std::to_string(i)+"_cdf.binary";
+      std::ifstream myfile3(filename, std::ios::in|std::ios::binary);
+      myfile3.read((char*)&CDFTABLE[num_samples*i], num_samples*sizeof(float));
+    }
+    filename = dir+subfile+"/ratio.binary";
+    std::ifstream myfile4(filename, std::ios::in|std::ios::binary);
+    if (method==0)
+      myfile4.read((char*)&RATIO[0], num_nor*nSpectralSamples*sizeof(float)); // wave
+    else
+      myfile4.read((char*)&RATIO[0], phionum*sizeof(float)); // ray
+  }
+
+  // (Mandy Xia) Helper function for reading in fiber azimuthal scattering functions
+  void readintextured(int color, std::string dir, std::string subfile, std::string prefix, unsigned long long num_samples, unsigned long long num_nor, int phionum, int method){
+    std::string filename;
+    for (int index = 0; index < color; index++){
+      for (int i = 0; i < nSpectralSamples; i++){
+        // read from binary
+        filename = dir+subfile+std::to_string(index+1)+"_cross"+prefix+std::to_string(i)+".binary";
+        std::ifstream myfile1(filename, std::ios::in|std::ios::binary);
+        myfile1.read((char*)&BSDFTABLE[num_samples*nSpectralSamples*index+num_samples*i], num_samples * sizeof(float));
+
+        filename = dir+subfile+std::to_string(index+1)+"_cross"+prefix+std::to_string(i)+"_nor.binary";
+        std::ifstream myfile2(filename, std::ios::in|std::ios::binary);
+        myfile2.read((char*)&PDFTABLE[num_samples*nSpectralSamples*index+num_samples*i], num_samples * sizeof(float));
+
+        filename = dir+subfile+std::to_string(index+1)+"_cross"+prefix+std::to_string(i)+"_cdf.binary";
+        std::ifstream myfile3(filename, std::ios::in|std::ios::binary);
+        myfile3.read((char*)&CDFTABLE[num_samples*nSpectralSamples*index+num_samples*i], num_samples * sizeof(float));
+      }
+      filename = dir+subfile+"/ratio.binary";
+      std::ifstream myfile4(filename, std::ios::in|std::ios::binary);
+      if (method==0)
+        myfile4.read((char*)&RATIO[index*num_nor], nSpectralSamples*num_nor*sizeof(float)); // wave
+      else
+        myfile4.read((char*)&RATIO[index*phionum], phionum*sizeof(float));
+    }
+  }
+
+  // (Mandy Xia) Read in fiber azimuthal scattering functions
+   void readBSDF(int type, std::string subfile, int color, int method){
+     // type is for cross-sectional shape. type==0 is circle; type==1 is ellipse; type==2 is nonellipse
+     // subfile is material name
+     // color is for texturing. color==1 is one fiber type; color>1 is texturing multiple fiber materials.
+     // method == 0 is wave optics; method == 1 is ray optics;
+    std::cout<<"type: "<<type<<std::endl;
+    std::cout<<"material: "<<subfile<<std::endl;
+    std::cout<<"color: "<<color<<std::endl;
+    fibertype = type;
+    std::string prefix, dir;
+    dir = "../data/";
+    if (method ==0){
+      prefix = "/TEM_";
+      std::cout<<"method: wave optics"<<std::endl;
+    }else if (method ==1){
+      prefix = "/ray_";
+      std::cout<<"method: ray optics"<<std::endl;
+    }
+
+    int thetanum = 100;  // number of longitudinal angle bins
+    int phiinum = 1;     // number of incoming azimuthal angle bins
+    int phionum = 360;   // number of outgoing azimuthal angle bins
+    std::string filename;
+    if (type == 0){ // circle
+      phiinum = 1;
+    }else if (type == 1){ // ellipse
+      phiinum = 90;
+    }else if (type==2){ // non-elliptical
+      phiinum = 360;
+    }else{
+      std::cerr << "ERROR: wrong cross-sectional type. Only 0,1,2 are allowed.\n";
+      std::terminate();
+    }
+    unsigned long long num_samples = phiinum * thetanum * phionum;
+    unsigned long long num_nor = phiinum * thetanum;
+    if (color==1)
+      readindata(dir, subfile, prefix, num_samples, num_nor, phionum, method);
+    else
+      readintextured(color, dir, subfile, prefix, num_samples, num_nor, phionum, method);
+
+    std::cout<<"BSDFTABLE[0] "<<BSDFTABLE[0]<<std::endl;
+    std::cout<<"PDFTABLE[0] "<<PDFTABLE[0]<<std::endl;
+    std::cout<<"CDFTABLE[0] "<<CDFTABLE[0]<<std::endl;
+    std::cout<<"RATIO[0] "<<RATIO[0]<<std::endl;
+    std::cout<<"finish reading tables"<<std::endl;
+  }
 
 void pbrtWorldEnd() {
     VERIFY_WORLD("WorldEnd");

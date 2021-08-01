@@ -64,7 +64,8 @@ class HairMaterial : public Material {
                  const std::shared_ptr<Texture<Float>> &eta,
                  const std::shared_ptr<Texture<Float>> &beta_m,
                  const std::shared_ptr<Texture<Float>> &beta_n,
-                 const std::shared_ptr<Texture<Float>> &alpha)
+                 const std::shared_ptr<Texture<Float>> &alpha,
+                 int crosssection)
         : sigma_a(sigma_a),
           color(color),
           eumelanin(eumelanin),
@@ -72,7 +73,8 @@ class HairMaterial : public Material {
           eta(eta),
           beta_m(beta_m),
           beta_n(beta_n),
-          alpha(alpha) {}
+          alpha(alpha),
+          crosssection(crosssection){}
     void ComputeScatteringFunctions(SurfaceInteraction *si, MemoryArena &arena,
                                     TransportMode mode,
                                     bool allowMultipleLobes) const;
@@ -82,6 +84,7 @@ class HairMaterial : public Material {
     std::shared_ptr<Texture<Spectrum>> sigma_a, color;
     std::shared_ptr<Texture<Float>> eumelanin, pheomelanin, eta;
     std::shared_ptr<Texture<Float>> beta_m, beta_n, alpha;
+    int crosssection;  // (Mandy Xia) Add a field for cross-section shape type.
 };
 
 HairMaterial *CreateHairMaterial(const TextureParams &mp);
@@ -95,8 +98,12 @@ class HairBSDF : public BxDF {
   public:
     // HairBSDF Public Methods
     HairBSDF(Float h, Float eta, const Spectrum &sigma_a, Float beta_m,
-             Float beta_n, Float alpha);
+             Float beta_n, Float alpha, int crosssection, Float ori, int wavelengthindex);
     Spectrum f(const Vector3f &wo, const Vector3f &wi) const;
+
+    // (Mandy Xia) Helper function for Sample_f
+  Float samplephi(int thetanum, int phionum, int phiinum, int floortheta, int floorphio, Float &pdf, Float phiunit, Float random) const;
+
     Spectrum Sample_f(const Vector3f &wo, Vector3f *wi, const Point2f &u,
                       Float *pdf, BxDFType *sampledType) const;
     Float Pdf(const Vector3f &wo, const Vector3f &wi) const;
@@ -115,6 +122,11 @@ class HairBSDF : public BxDF {
     Float v[pMax + 1];
     Float s;
     Float sin2kAlpha[3], cos2kAlpha[3];
+
+    // (Mandy Xia) Add fields for wave optics fibers.
+    int crosssection;
+    Float ori;
+    int wavelengthindex;
 };
 
 // General Utility Functions

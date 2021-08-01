@@ -45,7 +45,7 @@ namespace pbrt {
 struct CurveCommon;
 
 // CurveType Declarations
-enum class CurveType { Flat, Cylinder, Ribbon };
+  enum class CurveType { Flat, Cylinder, Ribbon, Ribbon_new};
 
 // CurveCommon Declarations
 struct CurveCommon {
@@ -64,16 +64,23 @@ class Curve : public Shape {
     // Curve Public Methods
     Curve(const Transform *ObjectToWorld, const Transform *WorldToObject,
           bool reverseOrientation, const std::shared_ptr<CurveCommon> &common,
-          Float uMin, Float uMax)
+          Float uMin, Float uMax, Float ori)
         : Shape(ObjectToWorld, WorldToObject, reverseOrientation),
           common(common),
           uMin(uMin),
-          uMax(uMax) {}
+          uMax(uMax),
+          ori(ori){}
     Bounds3f ObjectBound() const;
     bool Intersect(const Ray &ray, Float *tHit, SurfaceInteraction *isect,
                    bool testAlphaTexture) const;
+  bool IntersectP(const Ray &ray, bool testAlphaTexture = true) const {
+      return Intersect(ray, nullptr, nullptr, testAlphaTexture);
+    }
     Float Area() const;
     Interaction Sample(const Point2f &u, Float *pdf) const;
+
+  // (Mandy Xia) Add fields for fibers
+  const Float ori;
 
   private:
     // Curve Private Methods

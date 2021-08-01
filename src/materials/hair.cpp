@@ -42,6 +42,13 @@
 #include "texture.h"
 #include "textures/constant.h"
 
+// (Mandy Xia) Add this to be able to acquire curve primitives info.
+#include "../shapes/curve.h"
+extern float *BSDFTABLE;
+extern float *PDFTABLE;
+extern float *CDFTABLE;
+extern float *RATIO;
+
 namespace pbrt {
 
 // Hair Local Declarations
@@ -141,6 +148,13 @@ void HairMaterial::ComputeScatteringFunctions(SurfaceInteraction *si,
                                               MemoryArena &arena,
                                               TransportMode mode,
                                               bool allowMultipleLobes) const {
+    // (Mandy Xia) Read fiber orientation from curve primitives.
+    const Curve* cur = dynamic_cast<const Curve*>(si->shape);
+    Float ori = 0;
+    if (cur){
+      ori = cur->ori;
+    }
+
     Float bm = beta_m->Evaluate(*si);
     Float bn = beta_n->Evaluate(*si);
     Float a = alpha->Evaluate(*si);
@@ -163,7 +177,8 @@ void HairMaterial::ComputeScatteringFunctions(SurfaceInteraction *si,
 
     // Offset along width
     Float h = -1 + 2 * si->uv[1];
-    si->bsdf->Add(ARENA_ALLOC(arena, HairBSDF)(h, e, sig_a, bm, bn, a));
+    int wavelengthindex = si->wavelengthindex;   // (Mandy Xia) Get wavelength index from SurfaceInteraction.
+    si->bsdf->Add(ARENA_ALLOC(arena, HairBSDF)(h, e, sig_a, bm, bn, a, crosssection, ori, wavelengthindex));
 }
 
 HairMaterial *CreateHairMaterial(const TextureParams &mp) {
@@ -219,20 +234,25 @@ HairMaterial *CreateHairMaterial(const TextureParams &mp) {
     std::shared_ptr<Texture<Float>> beta_n = mp.GetFloatTexture("beta_n", 0.3f);
     std::shared_ptr<Texture<Float>> alpha = mp.GetFloatTexture("alpha", 2.f);
 
+    // (Mandy Xia) Read in cross-section type;
+    int crosssection = mp.FindInt("crosssection", 0);
     return new HairMaterial(sigma_a, color, eumelanin, pheomelanin, eta, beta_m,
-                            beta_n, alpha);
+                            beta_n, alpha, crosssection);
 }
 
 // HairBSDF Method Definitions
 HairBSDF::HairBSDF(Float h, Float eta, const Spectrum &sigma_a, Float beta_m,
-                   Float beta_n, Float alpha)
+                   Float beta_n, Float alpha, int crosssection, Float ori, int wavelengthindex)
     : BxDF(BxDFType(BSDF_GLOSSY | BSDF_REFLECTION | BSDF_TRANSMISSION)),
       h(h),
       gammaO(SafeASin(h)),
       eta(eta),
       sigma_a(sigma_a),
       beta_m(beta_m),
-      beta_n(beta_n) {
+      beta_n(beta_n),
+      crosssection(crosssection),
+      ori(ori),
+      wavelengthindex(wavelengthindex){
     CHECK(h >= -1 && h <= 1);
     CHECK(beta_m >= 0 && beta_m <= 1);
     CHECK(beta_n >= 0 && beta_n <= 1);
@@ -241,11 +261,9 @@ HairBSDF::HairBSDF(Float h, Float eta, const Spectrum &sigma_a, Float beta_m,
         pMax >= 3,
         "Longitudinal variance code must be updated to handle low pMax");
     v[0] = Sqr(0.726f * beta_m + 0.812f * Sqr(beta_m) + 3.7f * Pow<20>(beta_m));
-    v[1] = .25 * v[0];
-    v[2] = 4 * v[0];
-    for (int p = 3; p <= pMax; ++p)
-        // TODO: is there anything better here?
-        v[p] = v[2];
+    // (Mandy Xia) No cuticle scales, v sets to the same.
+    for (int p = 1; p<=pMax;++p)
+      v[p] = v[0];
 
     // Compute azimuthal logistic scale factor from $\beta_n$
     s = SqrtPiOver8 *
@@ -261,65 +279,89 @@ HairBSDF::HairBSDF(Float h, Float eta, const Spectrum &sigma_a, Float beta_m,
     }
 }
 
+
+  // (Mandy Xia) Evaluate f using precomputation tables.
 Spectrum HairBSDF::f(const Vector3f &wo, const Vector3f &wi) const {
     // Compute hair coordinate system terms related to _wo_
     Float sinThetaO = wo.x;
     Float cosThetaO = SafeSqrt(1 - Sqr(sinThetaO));
     Float phiO = std::atan2(wo.z, wo.y);
+    phiO += ori * M_PI/180;
 
     // Compute hair coordinate system terms related to _wi_
     Float sinThetaI = wi.x;
     Float cosThetaI = SafeSqrt(1 - Sqr(sinThetaI));
     Float phiI = std::atan2(wi.z, wi.y);
+    phiI += ori * M_PI / 180.0;  // Take orientation into account.
 
-    // Compute $\cos \thetat$ for refracted ray
-    Float sinThetaT = sinThetaO / eta;
-    Float cosThetaT = SafeSqrt(1 - Sqr(sinThetaT));
-
-    // Compute $\gammat$ for refracted ray
-    Float etap = std::sqrt(eta * eta - Sqr(sinThetaO)) / cosThetaO;
-    Float sinGammaT = h / etap;
-    Float cosGammaT = SafeSqrt(1 - Sqr(sinGammaT));
-    Float gammaT = SafeASin(sinGammaT);
-
-    // Compute the transmittance _T_ of a single path through the cylinder
-    Spectrum T = Exp(-sigma_a * (2 * cosGammaT / cosThetaT));
+    // resolution
+    int thetanum = 100; // longitudinal angle resolution
+    int phiinum = 360;  // outgoing phi resolution
+    int phionum;        // incoming phi resolution
 
     // Evaluate hair BSDF
     Float phi = phiI - phiO;
-    std::array<Spectrum, pMax + 1> ap = Ap(cosThetaO, eta, h, T);
-    Spectrum fsum(0.);
-    for (int p = 0; p < pMax; ++p) {
-        // Compute $\sin \thetao$ and $\cos \thetao$ terms accounting for scales
-        Float sinThetaOp, cosThetaOp;
-        if (p == 0) {
-            sinThetaOp = sinThetaO * cos2kAlpha[1] - cosThetaO * sin2kAlpha[1];
-            cosThetaOp = cosThetaO * cos2kAlpha[1] + sinThetaO * sin2kAlpha[1];
-        }
 
-        // Handle remainder of $p$ values for hair scale tilt
-        else if (p == 1) {
-            sinThetaOp = sinThetaO * cos2kAlpha[0] + cosThetaO * sin2kAlpha[0];
-            cosThetaOp = cosThetaO * cos2kAlpha[0] - sinThetaO * sin2kAlpha[0];
-        } else if (p == 2) {
-            sinThetaOp = sinThetaO * cos2kAlpha[2] + cosThetaO * sin2kAlpha[2];
-            cosThetaOp = cosThetaO * cos2kAlpha[2] - sinThetaO * sin2kAlpha[2];
-        } else {
-            sinThetaOp = sinThetaO;
-            cosThetaOp = cosThetaO;
-        }
+    Float asino = SafeASin(std::abs(sinThetaO));
+    Float unit = Pi / 2.0 / (Float)thetanum;
+    int floortheta = Clamp(std::floor(asino / unit), 0, thetanum-1);
 
-        // Handle out-of-range $\cos \thetao$ from scale adjustment
-        cosThetaOp = std::abs(cosThetaOp);
-        fsum += Mp(cosThetaI, cosThetaOp, sinThetaI, sinThetaOp, v[p]) * ap[p] *
-                Np(phi, p, s, gammaO, gammaT);
+    int floorphio, floorphii;
+    Float phiOnew = phiO;
+    while (phiOnew > 2*Pi) phiOnew -= 2 * Pi;
+    while (phiOnew < 0) phiOnew += 2 * Pi;
+    Float phiInew = phiI;
+    while (phiInew > 2*Pi) phiInew -= 2 * Pi;
+    while (phiInew < 0) phiInew += 2 * Pi;
+    Float phiunit = M_PI * 2 / (Float)phiinum;
+    if (crosssection==0){
+      // circle
+      phionum = 1;
+      floorphio = 0;
+      while (phi > 2*Pi) phi -= 2 * Pi;
+      while (phi < 0) phi += 2 * Pi;
+      floorphii = Clamp(std::floor(phi / phiunit), 0, phiinum-1);
+    }else if (crosssection==1){
+      // ellipse
+      phionum = 90;
+      //if (phiOnew < Pi/2) // don't need to change
+      if (phiOnew >= Pi/2 && phiOnew < Pi){
+        phiOnew = Pi - phiOnew;
+        phiInew = Pi - phiInew;
+        while (phiInew < 0) phiInew += 2 * Pi;
+      } else if (phiOnew >= Pi && phiOnew < 3.0*Pi/2.0){
+        phiOnew -= Pi;
+        phiInew -= Pi;
+        while (phiInew < 0) phiInew += 2 * Pi;
+      } else if (phiOnew >= 3.0*Pi/2.0){
+        phiOnew -= Pi;
+        phiInew -= Pi;
+        // treat it as second quadrant
+        phiOnew = Pi - phiOnew;
+        phiInew = Pi - phiInew;
+        while (phiInew < 0) phiInew += 2 * Pi;
+      }
+      Float phiounit = Pi/2.0/(Float)phionum;
+      floorphio = Clamp(std::floor(phiOnew / phiounit), 0, phionum-1);
+      floorphii = Clamp(std::floor(phiInew / phiunit), 0, phiinum-1);
+    }else{
+      // nonelliptical
+      phionum = 360;
+      floorphio = Clamp(std::floor(phiOnew / phiunit), 0, phionum-1);
+      floorphii = Clamp(std::floor(phiInew / phiunit), 0, phionum-1);
     }
 
-    // Compute contribution of remaining terms after _pMax_
-    fsum += Mp(cosThetaI, cosThetaO, sinThetaI, sinThetaO, v[pMax]) * ap[pMax] /
-            (2.f * Pi);
+    unsigned long long num_samples = thetanum * phionum * phiinum;
+    unsigned long long num_nor = phionum * phiinum;
+
+    Float AN = BSDFTABLE[wavelengthindex*num_samples + floortheta*num_nor + floorphio*phiinum + floorphii];
+
+    Spectrum fsum(0.);
+    cosThetaO = std::abs(cosThetaO);
+    fsum = Mp(cosThetaI, cosThetaO, sinThetaI, sinThetaO, v[0]) * AN;
     if (AbsCosTheta(wi) > 0) fsum /= AbsCosTheta(wi);
     CHECK(!std::isinf(fsum.y()) && !std::isnan(fsum.y()));
+
     return fsum;
 }
 
@@ -349,150 +391,209 @@ std::array<Float, pMax + 1> HairBSDF::ComputeApPdf(Float cosThetaO) const {
     return apPdf;
 }
 
+  // (Mandy Xia) Helper function for Sample_f.
+  Float HairBSDF::samplephi(int thetanum, int phionum, int phiinum, int floortheta, int floorphio, Float &pdf, Float phiunit, Float random) const{
+    int num_samples =  thetanum * phionum * phiinum;
+    int num_nor = phionum * phiinum;
+
+    //std::cout<<"wavelengthindex "<<wavelengthindex<<std::endl;
+    int tmpindex = wavelengthindex*num_samples + floortheta*num_nor + floorphio*phiinum;
+    Float cdf[phiinum];
+    for (int i = 0; i < phiinum; ++i){
+      cdf[i] = CDFTABLE[tmpindex + i];
+    }
+    int index, indexplus;
+    Float weight;
+    for (index = 0; index < phiinum; ++index){
+      if (random < cdf[index]){
+        if (index==0)
+          weight = random / cdf[0];
+        else
+          weight = (random-cdf[index-1])/(cdf[index]-cdf[index-1]);
+        break;
+      }
+    }
+    indexplus = Clamp(index + 1, 0, phiinum-1);
+    index = Clamp(index, 0, phiinum-1);
+
+    Float phistart = index*phiunit;
+    Float phiend = indexplus*phiunit;
+    Float dphi = (phiend - phistart) * weight + phistart;
+
+    pdf = PDFTABLE[wavelengthindex*num_samples+floortheta*num_nor+floorphio*phiinum+index];
+
+    return dphi;
+  }
+
+// (Mandy Xia) Sample using precomputation tables.
 Spectrum HairBSDF::Sample_f(const Vector3f &wo, Vector3f *wi, const Point2f &u2,
                             Float *pdf, BxDFType *sampledType) const {
     // Compute hair coordinate system terms related to _wo_
     Float sinThetaO = wo.x;
     Float cosThetaO = SafeSqrt(1 - Sqr(sinThetaO));
     Float phiO = std::atan2(wo.z, wo.y);
+    phiO += ori * M_PI/180.0;    // Take orientation into account.
 
     // Derive four random samples from _u2_
     Point2f u[2] = {DemuxFloat(u2[0]), DemuxFloat(u2[1])};
 
-    // Determine which term $p$ to sample for hair scattering
-    std::array<Float, pMax + 1> apPdf = ComputeApPdf(cosThetaO);
-    int p;
-    for (p = 0; p < pMax; ++p) {
-        if (u[0][0] < apPdf[p]) break;
-        u[0][0] -= apPdf[p];
-    }
-
-    // Rotate $\sin \thetao$ and $\cos \thetao$ to account for hair scale tilt
-    Float sinThetaOp, cosThetaOp;
-    if (p == 0) {
-        sinThetaOp = sinThetaO * cos2kAlpha[1] - cosThetaO * sin2kAlpha[1];
-        cosThetaOp = cosThetaO * cos2kAlpha[1] + sinThetaO * sin2kAlpha[1];
-    }
-    else if (p == 1) {
-        sinThetaOp = sinThetaO * cos2kAlpha[0] + cosThetaO * sin2kAlpha[0];
-        cosThetaOp = cosThetaO * cos2kAlpha[0] - sinThetaO * sin2kAlpha[0];
-    } else if (p == 2) {
-        sinThetaOp = sinThetaO * cos2kAlpha[2] + cosThetaO * sin2kAlpha[2];
-        cosThetaOp = cosThetaO * cos2kAlpha[2] - sinThetaO * sin2kAlpha[2];
-    } else {
-        sinThetaOp = sinThetaO;
-        cosThetaOp = cosThetaO;
-    }
-
     // Sample $M_p$ to compute $\thetai$
     u[1][0] = std::max(u[1][0], Float(1e-5));
     Float cosTheta =
-        1 + v[p] * std::log(u[1][0] + (1 - u[1][0]) * std::exp(-2 / v[p]));
+        1 + v[0] * std::log(u[1][0] + (1 - u[1][0]) * std::exp(-2 / v[0]));
     Float sinTheta = SafeSqrt(1 - Sqr(cosTheta));
     Float cosPhi = std::cos(2 * Pi * u[1][1]);
-    Float sinThetaI = -cosTheta * sinThetaOp + sinTheta * cosPhi * cosThetaOp;
+    Float sinThetaI = -cosTheta * sinThetaO + sinTheta * cosPhi * cosThetaO;
     Float cosThetaI = SafeSqrt(1 - Sqr(sinThetaI));
 
     // Sample $N_p$ to compute $\Delta\phi$
-
     // Compute $\gammat$ for refracted ray
-    Float etap = std::sqrt(eta * eta - Sqr(sinThetaO)) / cosThetaO;
-    Float sinGammaT = h / etap;
-    Float gammaT = SafeASin(sinGammaT);
-    Float dphi;
-    if (p < pMax)
-        dphi =
-            Phi(p, gammaO, gammaT) + SampleTrimmedLogistic(u[0][1], s, -Pi, Pi);
-    else
-        dphi = 2 * Pi * u[0][1];
+    // resolution
+    int thetanum = 100;
+    int phiinum = 360;
+    int phionum; // incident phi
+
+    // interpolate
+    Float asino = SafeASin(std::abs(sinThetaO));
+    Float unit = Pi / 2.0 / (Float)thetanum;
+    int floortheta = Clamp(std::floor(asino / unit), 0, thetanum-1);
+    Float phiI, dphi, pdfazimuthal, floorphio;
+    Float phiOnew = phiO;
+    while (phiOnew > 2*Pi) phiOnew -= 2 * Pi;
+    while (phiOnew < 0) phiOnew += 2 * Pi;
+    Float phiunit = M_PI * 2 / (Float)phiinum;
+    if (crosssection==0){
+      // circle
+      phionum = 1;
+      floorphio = 0;
+      dphi = samplephi(thetanum, phionum, phiinum, floortheta, floorphio, pdfazimuthal, phiunit, u[0][1]);
+      phiI = phiO + dphi;
+    }else if (crosssection==1){
+      // ellipse
+      phionum = 90;
+      Float phiOnewsave = phiOnew;
+      if (phiOnew >= Pi/2 && phiOnew < Pi){
+        phiOnew = Pi - phiOnew;
+      } else if (phiOnew >= Pi && phiOnew < 3.0*Pi/2.0){
+        phiOnew -= Pi;
+      } else if (phiOnew >= 3.0*Pi/2.0){
+        phiOnew -= Pi;
+        phiOnew = Pi - phiOnew;
+      }
+      Float phiounit = Pi/2.0/(Float)phionum;
+      floorphio = Clamp(std::floor(phiOnew / phiounit), 0, phionum-1);
+      dphi = samplephi(thetanum, phionum, phiinum, floortheta, floorphio, pdfazimuthal, phiunit, u[0][1]);
+
+      phiI = dphi;
+      if (phiOnewsave >= Pi/2 && phiOnewsave < Pi){
+        phiI = Pi - dphi;
+      } else if (phiOnewsave >= Pi && phiOnewsave < 3.0*Pi/2.0){
+        phiI += Pi;
+      } else if (phiOnewsave >= 3.0*Pi/2.0){
+        phiI = Pi - dphi;
+        phiI += Pi;
+      }
+    }else{
+      // nonelliptical
+      phionum = 360;
+      Float phiounit = Pi*2.0/(Float)phionum;
+      floorphio = Clamp(std::floor(phiOnew / phiounit), 0, phionum-1);
+      phiI = samplephi(thetanum, phionum, phiinum, floortheta, floorphio, pdfazimuthal, phiunit, u[0][1]);
+    }
+    // rotate phiI back
+    phiI -= ori * M_PI/180;
 
     // Compute _wi_ from sampled hair scattering angles
-    Float phiI = phiO + dphi;
     *wi = Vector3f(sinThetaI, cosThetaI * std::cos(phiI),
                    cosThetaI * std::sin(phiI));
 
     // Compute PDF for sampled hair scattering direction _wi_
-    *pdf = 0;
-    for (int p = 0; p < pMax; ++p) {
-        // Compute $\sin \thetao$ and $\cos \thetao$ terms accounting for scales
-        Float sinThetaOp, cosThetaOp;
-        if (p == 0) {
-            sinThetaOp = sinThetaO * cos2kAlpha[1] - cosThetaO * sin2kAlpha[1];
-            cosThetaOp = cosThetaO * cos2kAlpha[1] + sinThetaO * sin2kAlpha[1];
-        }
+    cosThetaO = std::abs(cosThetaO);
+    *pdf = Mp(cosThetaI, cosThetaO, sinThetaI, sinThetaO, v[0]) * pdfazimuthal;
 
-        // Handle remainder of $p$ values for hair scale tilt
-        else if (p == 1) {
-            sinThetaOp = sinThetaO * cos2kAlpha[0] + cosThetaO * sin2kAlpha[0];
-            cosThetaOp = cosThetaO * cos2kAlpha[0] - sinThetaO * sin2kAlpha[0];
-        } else if (p == 2) {
-            sinThetaOp = sinThetaO * cos2kAlpha[2] + cosThetaO * sin2kAlpha[2];
-            cosThetaOp = cosThetaO * cos2kAlpha[2] - sinThetaO * sin2kAlpha[2];
-        } else {
-            sinThetaOp = sinThetaO;
-            cosThetaOp = cosThetaO;
-        }
+    Spectrum result = f(wo, *wi);
 
-        // Handle out-of-range $\cos \thetao$ from scale adjustment
-        cosThetaOp = std::abs(cosThetaOp);
-        *pdf += Mp(cosThetaI, cosThetaOp, sinThetaI, sinThetaOp, v[p]) *
-                apPdf[p] * Np(dphi, p, s, gammaO, gammaT);
-    }
-    *pdf += Mp(cosThetaI, cosThetaO, sinThetaI, sinThetaO, v[pMax]) *
-            apPdf[pMax] * (1 / (2 * Pi));
-    // if (std::abs(wi->x) < .9999) CHECK_NEAR(*pdf, Pdf(wo, *wi), .01);
-    return f(wo, *wi);
+    return result;
 }
 
+  // (Mandy Xia) Evaluate pdf using precomputation tables.
 Float HairBSDF::Pdf(const Vector3f &wo, const Vector3f &wi) const {
     // Compute hair coordinate system terms related to _wo_
     Float sinThetaO = wo.x;
     Float cosThetaO = SafeSqrt(1 - Sqr(sinThetaO));
     Float phiO = std::atan2(wo.z, wo.y);
+    phiO += ori * M_PI/180;
 
     // Compute hair coordinate system terms related to _wi_
     Float sinThetaI = wi.x;
     Float cosThetaI = SafeSqrt(1 - Sqr(sinThetaI));
     Float phiI = std::atan2(wi.z, wi.y);
+    phiI += ori * M_PI/180;
 
-    // Compute $\gammat$ for refracted ray
-    Float etap = std::sqrt(eta * eta - Sqr(sinThetaO)) / cosThetaO;
-    Float sinGammaT = h / etap;
-    Float gammaT = SafeASin(sinGammaT);
-
-    // Compute PDF for $A_p$ terms
-    std::array<Float, pMax + 1> apPdf = ComputeApPdf(cosThetaO);
-
-    // Compute PDF sum for hair scattering events
     Float phi = phiI - phiO;
     Float pdf = 0;
-    for (int p = 0; p < pMax; ++p) {
-        // Compute $\sin \thetao$ and $\cos \thetao$ terms accounting for scales
-        Float sinThetaOp, cosThetaOp;
-        if (p == 0) {
-            sinThetaOp = sinThetaO * cos2kAlpha[1] - cosThetaO * sin2kAlpha[1];
-            cosThetaOp = cosThetaO * cos2kAlpha[1] + sinThetaO * sin2kAlpha[1];
-        }
 
-        // Handle remainder of $p$ values for hair scale tilt
-        else if (p == 1) {
-            sinThetaOp = sinThetaO * cos2kAlpha[0] + cosThetaO * sin2kAlpha[0];
-            cosThetaOp = cosThetaO * cos2kAlpha[0] - sinThetaO * sin2kAlpha[0];
-        } else if (p == 2) {
-            sinThetaOp = sinThetaO * cos2kAlpha[2] + cosThetaO * sin2kAlpha[2];
-            cosThetaOp = cosThetaO * cos2kAlpha[2] - sinThetaO * sin2kAlpha[2];
-        } else {
-            sinThetaOp = sinThetaO;
-            cosThetaOp = cosThetaO;
-        }
+    int thetanum = 100;
+    int phiinum = 360;
+    int phionum ; // incident angle num
 
-        // Handle out-of-range $\cos \thetao$ from scale adjustment
-        cosThetaOp = std::abs(cosThetaOp);
-        pdf += Mp(cosThetaI, cosThetaOp, sinThetaI, sinThetaOp, v[p]) *
-               apPdf[p] * Np(phi, p, s, gammaO, gammaT);
+    Float asino = SafeASin(std::abs(sinThetaO));
+    Float unit = Pi / 2.0 / (Float)thetanum;
+    int floortheta = Clamp(std::floor(asino / unit), 0, thetanum-1);
+
+    int floorphio, floorphii;
+    Float phiOnew = phiO;
+    while (phiOnew > 2*Pi) phiOnew -= 2 * Pi;
+    while (phiOnew < 0) phiOnew += 2 * Pi;
+    Float phiInew = phiI;
+    while (phiInew > 2*Pi) phiInew -= 2 * Pi;
+    while (phiInew < 0) phiInew += 2 * Pi;
+    Float phiunit = M_PI * 2 / (Float)phiinum;
+    if (crosssection==0){
+      // circle
+      phionum = 1;
+      floorphio = 0;
+      while (phi > 2*Pi) phi -= 2 * Pi;
+      while (phi < 0) phi += 2 * Pi;
+      floorphii = Clamp(std::floor(phi / phiunit), 0, phiinum-1);
+    }else if (crosssection==1){
+      // ellipse
+      phionum = 90;
+      //if (phiOnew < Pi/2) // don't need to change
+      if (phiOnew >= Pi/2 && phiOnew < Pi){
+        phiOnew = Pi - phiOnew;
+        phiInew = Pi - phiInew;
+        while (phiInew < 0) phiInew += 2 * Pi;
+      } else if (phiOnew >= Pi && phiOnew < 3.0*Pi/2.0){
+        phiOnew -= Pi;
+        phiInew -= Pi;
+        while (phiInew < 0) phiInew += 2 * Pi;
+      } else if (phiOnew >= 3.0*Pi/2.0){
+        phiOnew -= Pi;
+        phiInew -= Pi;
+        // treat it as second quadrant
+        phiOnew = Pi - phiOnew;
+        phiInew = Pi - phiInew;
+        while (phiInew < 0) phiInew += 2 * Pi;
+      }
+      Float phiounit = Pi/2.0/(Float)phionum;
+      floorphio = Clamp(std::floor(phiOnew / phiounit), 0, phionum-1);
+      floorphii = Clamp(std::floor(phiInew / phiunit), 0, phiinum-1);
+    }else{
+      // nonelliptical
+      phionum = 360;
+      floorphio = Clamp(std::floor(phiOnew / phiunit), 0, phionum-1);
+      floorphii = Clamp(std::floor(phiInew / phiunit), 0, phiinum-1);
     }
-    pdf += Mp(cosThetaI, cosThetaO, sinThetaI, sinThetaO, v[pMax]) *
-           apPdf[pMax] * (1 / (2 * Pi));
+
+    unsigned long long num_samples = thetanum * phionum * phiinum;
+    unsigned long long num_nor = phionum * phiinum;
+
+    pdf = PDFTABLE[wavelengthindex*num_samples + floortheta*num_nor + floorphio*phiinum + floorphii];
+
+    cosThetaO = std::abs(cosThetaO);
+    pdf *= Mp(cosThetaI, cosThetaO, sinThetaI, sinThetaO, v[0]);
+
     return pdf;
 }
 

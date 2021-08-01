@@ -1072,6 +1072,14 @@ static void parse(std::unique_ptr<Tokenizer> t) {
                     [&](const std::string &texName, const ParamSet &params) {
                         pbrtTexture(name, type, texName, params);
                     });
+            } else if (tok == "Type"){
+              // (Mandy Xia) Adding cross section type
+              int type = (int)parseNumber(nextToken(TokenRequired));
+              string_view n = dequoteString(nextToken(TokenRequired));
+              std::string name = toString(n);
+              int color = (int)parseNumber(nextToken(TokenRequired));
+              int method = (int)parseNumber(nextToken(TokenRequired));
+              readBSDF(type, name, color, method);
             } else
                 syntaxError(tok);
             break;
