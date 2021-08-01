@@ -29,4 +29,4 @@ parallel (e.g. `make -j8`).
 
 Download data and scenes
 --------------
-Examples of fiber Scattering functions can be downloaded from this [shared folder](https://drive.google.com/drive/folders/12MIcSFucB0IbVl5Y41Lgt2_JoICuJozF?usp=sharing). Please place this data folder under repo's root directory. The example scene files can be downloaded from this [shared folder](https://drive.google.com/drive/folders/1I0wX_URJ2uFsw2NF3abgbP2EcVLHHKF6?usp=sharing). The render images are located in the directory render/. Usage: In WaveOpticsFiberRendering/build, run ./pbrt scenes/1layer/1e-6.forward.pbrt.
+Examples of fiber Scattering functions can be downloaded from this [shared folder](https://drive.google.com/drive/folders/12MIcSFucB0IbVl5Y41Lgt2_JoICuJozF?usp=sharing). Please place this data folder under repo's root directory. The example scene files can be downloaded from this [shared folder](https://drive.google.com/drive/folders/1I0wX_URJ2uFsw2NF3abgbP2EcVLHHKF6?usp=sharing). The render images are located in the directory render/. Usage: In WaveOpticsFiberRendering/build, run ./pbrt scenes/1layer/1e-6_forward.pbrt.
